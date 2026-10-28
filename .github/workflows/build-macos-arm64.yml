@@ -1,0 +1,89 @@
+name: Build macOS arm64
+
+# Upstream build.yml runs on macos-13 (Intel) with no CMAKE_OSX_ARCHITECTURES,
+# so its .app/.dmg are x86_64-only. This workflow builds a native arm64
+# (Apple Silicon) .app/.dmg on a real arm64 runner, using Homebrew's native
+# arm64 Qt 5 (qt@5) instead of the x86_64-only Qt 5.15.2 binary used upstream.
+#
+# How to use (no Mac needed):
+#   1. Fork https://github.com/kefir500/apk-editor-studio on GitHub.
+#   2. Put this file at .github/workflows/build-macos-arm64.yml in the fork.
+#   3. GitHub web UI: Actions > "Build macOS arm64" > Run workflow.
+#   4. Download the "apk-editor-studio-macos-arm64" artifact when it finishes.
+# The build is unsigned/notarized: on first launch, right-click the .app and
+# choose Open (or run: xattr -cr "APK Editor Studio.app"). apktool also needs
+# a Java runtime installed on the Mac (arm64 JRE/JDK).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [build-macos-arm64]
+    paths: [.github/workflows/build-macos-arm64.yml]
+
+jobs:
+  build-macos-arm64:
+    name: macOS Build arm64 (APP, DMG)
+    runs-on: macos-15
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Install Qt 5 (arm64, Homebrew)
+        run: |
+          brew install qt@5 cmake
+          echo "QT_PREFIX=$(brew --prefix qt@5)"
+          "$(brew --prefix qt@5)/bin/qmake" --version
+          uname -m
+
+      - name: Download Tools
+        run: python3 scripts/download.py
+
+      - name: Raise deployment target for arm64
+        # CMakeLists.txt FORCE-sets CMAKE_OSX_DEPLOYMENT_TARGET to 10.13,
+        # which is invalid for arm64 (arm64 needs macOS 11+). Patch it
+        # in the checkout only; this does not touch the upstream repo.
+        run: |
+          perl -i -pe 's/"10\.13"/"11.0"/' CMakeLists.txt
+          grep -n 'CMAKE_OSX_DEPLOYMENT_TARGET' CMakeLists.txt
+
+      - name: Build APP
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@5)"
+          cmake --build build --config Release
+
+      - name: Verify arm64 binary
+        run: |
+          APP="build/apk-editor-studio.app"
+          test -x "$APP/Contents/MacOS/apk-editor-studio"
+          echo "Executable archs: $(lipo -archs "$APP/Contents/MacOS/apk-editor-studio")"
+          test "$(lipo -archs "$APP/Contents/MacOS/apk-editor-studio")" = "arm64"
+          echo "QtCore archs: $(lipo -archs "$APP/Contents/Frameworks/QtCore.framework/QtCore" 2>/dev/null || echo "QtCore not bundled here")"
+
+      - name: Package APP (ZIP)
+        run: |
+          VERSION="$(cat VERSION)"
+          mv build/apk-editor-studio.app "APK Editor Studio.app"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "APK Editor Studio.app" \
+            "apk-editor-studio_macos-arm64_${VERSION}.app.zip"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Package DMG
+        run: |
+          # appdmg's config expects the .app under scripts/macos/packages/app/
+          cp -R "APK Editor Studio.app" scripts/macos/packages/app/
+          npm i appdmg
+          (cd scripts/macos/packages/dmg && npx appdmg "appdmg/config.json" "apk-editor-studio_macos_${VERSION}.dmg")
+          mv "scripts/macos/packages/dmg/apk-editor-studio_macos_${VERSION}.dmg" \
+             "apk-editor-studio_macos-arm64_${VERSION}.dmg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-editor-studio-macos-arm64
+          path: |
+            apk-editor-studio_macos-arm64_*.app.zip
+            apk-editor-studio_macos-arm64_*.dmg
