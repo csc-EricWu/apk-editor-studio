@@ -47,10 +47,15 @@ jobs:
           grep -n 'CMAKE_OSX_DEPLOYMENT_TARGET' CMakeLists.txt
 
       - name: Build APP
+        # lib/QtKeychain/CMakeLists.txt still says cmake_minimum_required(VERSION 3.3);
+        # CMake 4 (shipped on macos-15 / VS 2026 runners) removed compatibility with
+        # CMake < 3.5, so configure fails there without this flag. The flag is the
+        # fix CMake's own error message suggests; it does not change any source.
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_PREFIX_PATH="$(brew --prefix qt@5)"
           cmake --build build --config Release
 
