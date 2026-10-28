@@ -5,7 +5,7 @@ on: push
 jobs:
   build-windows-msi:
     name: Windows Build (MSI)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
@@ -42,7 +42,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
   build-windows-zip:
     name: Windows Build (ZIP)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
