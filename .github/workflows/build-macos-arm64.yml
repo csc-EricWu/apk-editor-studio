@@ -10,9 +10,9 @@ name: Build macOS arm64
 #   2. Put this file at .github/workflows/build-macos-arm64.yml in the fork.
 #   3. GitHub web UI: Actions > "Build macOS arm64" > Run workflow.
 #   4. Download the "apk-editor-studio-macos-arm64" artifact when it finishes.
-# The build is unsigned/notarized: on first launch, right-click the .app and
-# choose Open (or run: xattr -cr "APK Editor Studio.app"). apktool also needs
-# a Java runtime installed on the Mac (arm64 JRE/JDK).
+# The .app is ad-hoc signed, not Developer ID signed or notarized. On first
+# launch, right-click the .app and choose Open (or run: xattr -cr "APK Editor Studio.app").
+# apktool also needs a Java runtime installed on the Mac (arm64 JRE/JDK).
 
 on:
   workflow_dispatch:
@@ -66,6 +66,34 @@ jobs:
           echo "Executable archs: $(lipo -archs "$APP/Contents/MacOS/apk-editor-studio")"
           test "$(lipo -archs "$APP/Contents/MacOS/apk-editor-studio")" = "arm64"
           echo "QtCore archs: $(lipo -archs "$APP/Contents/Frameworks/QtCore.framework/QtCore" 2>/dev/null || echo "QtCore not bundled here")"
+
+      - name: Ad-hoc sign embedded libraries
+        # Homebrew's Qt (and its dependencies) are ad-hoc signed. macdeployqt
+        # rewrites LC_ID_DYLIB / LC_RPATH with install_name_tool, which
+        # invalidates those signatures. macOS 15+ dyld then SIGKILLs the
+        # process at launch: EXC_BAD_ACCESS / "Code Signature Invalid"
+        # (CODESIGNING, Invalid Page), before main() runs.
+        # Re-sign every Mach-O except the main executable. That binary is
+        # already linker-signed, and Contents/MacOS also contains non-code
+        # files (resources, tools) so sealing the bundle fails. adb and
+        # zipalign already have valid signatures and are left alone.
+        run: |
+          APP="build/apk-editor-studio.app"
+          MAIN="$APP/Contents/MacOS/apk-editor-studio"
+          while IFS= read -r -d '' f; do
+            if [ "$f" = "$MAIN" ]; then
+              continue
+            fi
+            if file -b "$f" | grep -q 'Mach-O'; then
+              if ! codesign --verify "$f" >/dev/null 2>&1; then
+                codesign --force --sign - "$f"
+              fi
+            fi
+          done < <(find "$APP" -type f -print0)
+          codesign --verify --verbose=2 "$APP/Contents/Frameworks/QtCore.framework/Versions/5/QtCore"
+          codesign --verify --verbose=2 "$APP/Contents/Frameworks/QtWidgets.framework/Versions/5/QtWidgets"
+          codesign --verify --verbose=2 "$APP/Contents/Frameworks/QtGui.framework/Versions/5/QtGui"
+          codesign --verify --verbose=2 "$APP/Contents/PlugIns/platforms/libqcocoa.dylib"
 
       - name: Package APP (ZIP)
         run: |

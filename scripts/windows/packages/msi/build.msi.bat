@@ -11,7 +11,8 @@ cmake "%~dp0\..\..\..\.." ^
     -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=. ^
     -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE=. ^
     -DCMAKE_PREFIX_PATH="%QTDIR%" ^
-    -DOPENSSL_ROOT_DIR="%OPENSSL%"
+    -DOPENSSL_ROOT_DIR="%OPENSSL%" ^
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build --config Release || exit /b
 
 rem Package
