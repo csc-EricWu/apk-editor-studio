@@ -81,13 +81,18 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
   build-linux-appimage:
     name: Linux Build (AppImage)
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Install Dependencies
+        # ubuntu-20.04 is retired, so this job never got a runner. The old
+        # beineri/opt-qt-5.15.2-focal PPA only ships packages for Focal
+        # (20.04), so it cannot be kept on a newer runner: use Ubuntu 22.04's
+        # system Qt 5.15 instead. No qt515-env.sh sourcing is needed;
+        # find_package(Qt5) finds the system Qt. libfuse2 is required for
+        # linuxdeployqt's AppImage to run on 22.04+.
         run: |
-          sudo add-apt-repository ppa:beineri/opt-qt-5.15.2-focal -y
           sudo apt-get update -qq
-          sudo apt-get install qt515base qt515imageformats qt515svg qt515tools libgl1-mesa-dev libsecret-1-dev adb zipalign
+          sudo apt-get install -y qtbase5-dev qttools5-dev qttools5-dev-tools libqt5svg5-dev libgl1-mesa-dev libsecret-1-dev libfuse2 adb zipalign
       - name: Checkout Repo
         uses: actions/checkout@v4
       - name: Download Tools
@@ -95,7 +100,6 @@ jobs:
       - name: Build AppImage Package
         id: build
         run: |
-          source /opt/qt515/bin/qt515-env.sh || true
           scripts/linux/packages/appimage/build.appimage.sh
           echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
       - name: Upload Assets
@@ -110,29 +114,105 @@ jobs:
           tag: development
           token: ${{ secrets.GITHUB_TOKEN }}
   build-macos:
-    name: macOS Build (APP, DMG)
-    runs-on: macos-13
+    # Formerly the separate build-macos-arm64 workflow. Intel (x86_64) support
+    # is dropped: this job is arm64-only, on macos-15 with Homebrew's native
+    # arm64 Qt 5 (qt@5). The old macos-13 / install-qt-action x86_64 Qt path
+    # is gone; do not restore it without also restoring an Intel runner.
+    name: macOS Build arm64 (APP, DMG)
+    runs-on: macos-15
     steps:
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v3
-        with:
-          version: 5.15.2
-          cache: true
       - name: Checkout Repo
         uses: actions/checkout@v4
+
+      - name: Install Qt 5 (arm64, Homebrew)
+        run: |
+          brew install qt@5 cmake
+          echo "QT_PREFIX=$(brew --prefix qt@5)"
+          "$(brew --prefix qt@5)/bin/qmake" --version
+          uname -m
+
       - name: Download Tools
         run: python3 scripts/download.py
-      - name: Build APP/DMG Package
-        id: build
+
+      - name: Raise deployment target for arm64
+        # CMakeLists.txt FORCE-sets CMAKE_OSX_DEPLOYMENT_TARGET to 10.13,
+        # which is invalid for arm64 (arm64 needs macOS 11+). Patch it
+        # in the checkout only; this does not touch the upstream repo.
         run: |
-          scripts/macos/packages/app/build.app.command
+          perl -i -pe 's/"10\.13"/"11.0"/' CMakeLists.txt
+          grep -n 'CMAKE_OSX_DEPLOYMENT_TARGET' CMakeLists.txt
+
+      - name: Build APP
+        # lib/QtKeychain/CMakeLists.txt still says cmake_minimum_required(VERSION 3.3);
+        # CMake 4 (shipped on macos-15 runners) removed compatibility with
+        # CMake < 3.5, so configure fails there without this flag. The flag is the
+        # fix CMake's own error message suggests; it does not change any source.
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@5)"
+          cmake --build build --config Release
+
+      - name: Verify arm64 binary
+        run: |
+          APP="build/apk-editor-studio.app"
+          test -x "$APP/Contents/MacOS/apk-editor-studio"
+          echo "Executable archs: $(lipo -archs "$APP/Contents/MacOS/apk-editor-studio")"
+          test "$(lipo -archs "$APP/Contents/MacOS/apk-editor-studio")" = "arm64"
+          echo "QtCore archs: $(lipo -archs "$APP/Contents/Frameworks/QtCore.framework/QtCore" 2>/dev/null || echo "QtCore not bundled here")"
+
+      - name: Ad-hoc sign embedded libraries
+        # Homebrew's Qt (and its dependencies) are ad-hoc signed. macdeployqt
+        # rewrites LC_ID_DYLIB / LC_RPATH with install_name_tool, which
+        # invalidates those signatures. macOS 15+ dyld then SIGKILLs the
+        # process at launch: EXC_BAD_ACCESS / "Code Signature Invalid"
+        # (CODESIGNING, Invalid Page), before main() runs.
+        # Re-sign every Mach-O except the main executable. That binary is
+        # already linker-signed, and Contents/MacOS also contains non-code
+        # files (resources, tools) so sealing the bundle fails. adb and
+        # zipalign already have valid signatures and are left alone.
+        run: |
+          APP="build/apk-editor-studio.app"
+          MAIN="$APP/Contents/MacOS/apk-editor-studio"
+          while IFS= read -r -d '' f; do
+            if [ "$f" = "$MAIN" ]; then
+              continue
+            fi
+            if file -b "$f" | grep -q 'Mach-O'; then
+              if ! codesign --verify "$f" >/dev/null 2>&1; then
+                codesign --force --sign - "$f"
+              fi
+            fi
+          done < <(find "$APP" -type f -print0)
+          codesign --verify --verbose=2 "$APP/Contents/Frameworks/QtCore.framework/Versions/5/QtCore"
+          codesign --verify --verbose=2 "$APP/Contents/Frameworks/QtWidgets.framework/Versions/5/QtWidgets"
+          codesign --verify --verbose=2 "$APP/Contents/Frameworks/QtGui.framework/Versions/5/QtGui"
+          codesign --verify --verbose=2 "$APP/Contents/PlugIns/platforms/libqcocoa.dylib"
+
+      - name: Package APP (ZIP)
+        run: |
+          VERSION="$(cat VERSION)"
+          mv build/apk-editor-studio.app "APK Editor Studio.app"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "APK Editor Studio.app" \
+            "apk-editor-studio_macos-arm64_${VERSION}.app.zip"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Package DMG
+        run: |
+          # appdmg's config expects the .app under scripts/macos/packages/app/
+          cp -R "APK Editor Studio.app" scripts/macos/packages/app/
           npm i appdmg
-          scripts/macos/packages/dmg/build.dmg.command
-          echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
+          (cd scripts/macos/packages/dmg && npx appdmg "appdmg/config.json" "apk-editor-studio_macos_${VERSION}.dmg")
+          mv "scripts/macos/packages/dmg/apk-editor-studio_macos_${VERSION}.dmg" \
+             "apk-editor-studio_macos-arm64_${VERSION}.dmg"
+
       - name: Upload Assets
         uses: ncipollo/release-action@v1
         with:
-          artifacts: scripts/macos/packages/app/apk-editor-studio_macos_${{ env.VERSION }}.app.zip,scripts/macos/packages/dmg/apk-editor-studio_macos_${{ env.VERSION }}.dmg
+          artifacts: apk-editor-studio_macos-arm64_${{ env.VERSION }}.app.zip,apk-editor-studio_macos-arm64_${{ env.VERSION }}.dmg
           artifactErrorsFailBuild: true
           allowUpdates: true
           omitName: true
