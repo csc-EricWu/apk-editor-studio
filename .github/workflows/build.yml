@@ -20,7 +20,19 @@ jobs:
       - name: Download Tools
         run: python scripts\download.py
       - name: Download OpenSSL
-        run: choco install -y openssl --version=1.1.1.2100 --x86
+        shell: pwsh
+        run: |
+          # community.chocolatey.org can return a transient 504 (seen 2026-10-29);
+          # the 1.1.1.2100 package itself still exists. Retry instead of failing
+          # the whole job on one gateway timeout.
+          $attempt = 0
+          do {
+            $attempt++
+            choco install -y openssl --version=1.1.1.2100 --x86
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 3) { Write-Host "choco attempt $attempt/3 failed, retrying in 60s..."; Start-Sleep -Seconds 60 }
+          } while ($attempt -lt 3)
+          exit 1
       - name: Build MSI Package
         id: build
         shell: cmd
@@ -56,7 +68,19 @@ jobs:
       - name: Download Tools
         run: python scripts\download.py
       - name: Download OpenSSL
-        run: choco install -y openssl --version=1.1.1.2100 --x86
+        shell: pwsh
+        run: |
+          # community.chocolatey.org can return a transient 504 (seen 2026-10-29);
+          # the 1.1.1.2100 package itself still exists. Retry instead of failing
+          # the whole job on one gateway timeout.
+          $attempt = 0
+          do {
+            $attempt++
+            choco install -y openssl --version=1.1.1.2100 --x86
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 3) { Write-Host "choco attempt $attempt/3 failed, retrying in 60s..."; Start-Sleep -Seconds 60 }
+          } while ($attempt -lt 3)
+          exit 1
       - name: Build ZIP Package
         id: build
         shell: cmd
